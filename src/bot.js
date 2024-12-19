@@ -4,6 +4,8 @@ import fs from "fs";
 import path from "path";
 import https from "https";
 import { DateTime } from "luxon";
+import { z } from "zod";
+import { zodResponseFormat } from "openai/helpers/zod";
 import OpenAI from "openai";
 
 dotenv.config(); // Carrega variáveis de ambiente
@@ -17,55 +19,49 @@ const openai = new OpenAI({
 // Inicializa o bot do Telegram
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
 
-// Configurações de custos
-const WHISPER_COST_PER_MINUTE = 0.006;
-const LLM_COST_PER_1000_TOKENS = 0.002;
+// Esquema para entradas financeiras
+const FinancialEntrySchema = z.object({
+    date: z.string().refine((date) => DateTime.fromISO(date).isValid, { message: "Invalid date format" }),
+    description: z.string(),
+    value: z.number(),
+    additionalProperties: false, // Propriedade para evitar dados extras
+});
 
+// Esquema principal
+const FinancialEntriesSchema = z.object({
+    entries: z.array(FinancialEntrySchema),
+    additionalProperties: false,
+});
+
+// Função principal do bot
 bot.on("voice", async (msg) => {
     const chatId = msg.chat.id;
     const fileId = msg.voice.file_id;
-    const duration = msg.voice.duration;
 
-    console.log(`[INFO] Mensagem recebida: Chat ID = ${chatId}, File ID = ${fileId}, Duração = ${duration} segundos`);
+    console.log(`[INFO] Mensagem recebida: Chat ID = ${chatId}, File ID = ${fileId}`);
 
     try {
         // Baixar o áudio do Telegram
         const audioPath = await downloadAudio(fileId);
         console.log(`[INFO] Áudio baixado: Caminho = ${audioPath}`);
 
-        // Transcrever o áudio usando o Whisper
+        // Transcrever o áudio usando Whisper
         const transcription = await transcribeAudio(audioPath);
         console.log(`[INFO] Transcrição recebida: ${transcription}`);
 
-        // Detectar lançamentos financeiros e normalizar datas
-        const launches = await detectAndNormalizeLaunches(transcription);
-        console.log(`[INFO] Lançamentos detectados: ${JSON.stringify(launches)}`);
-
-        // Calcular custos
-        // const whisperCost = calculateWhisperCost(duration);
-        // const llmCost = calculateLLMCost(transcription);
-        // const totalCost = whisperCost + llmCost;
-
-        // console.log(`[INFO] Custos calculados: Whisper = $${whisperCost}, LLM = $${llmCost}, Total = $${totalCost}`);
+        // Detectar e normalizar lançamentos financeiros
+        const entries = await detectAndNormalizeLaunches(transcription);
+        console.log(`[INFO] Lançamentos detectados: ${JSON.stringify(entries)}`);
 
         // Enviar respostas ao usuário
         bot.sendMessage(chatId, `*Transcrição:*\n${transcription}`, { parse_mode: "Markdown" });
-        bot.sendMessage(chatId, formatTableMarkdown(launches), { parse_mode: "Markdown" });
-        // bot.sendMessage(
-        //     chatId,
-        //     `*Custos:*\n` +
-        //         `- *Whisper:* ${convertToCents(whisperCost)} centavos\n` +
-        //         `- *LLM:* ${convertToCents(llmCost)} centavos\n` +
-        //         `- *Total:* ${convertToCents(totalCost)} centavos`,
-        //     { parse_mode: "Markdown" }
-        // );
+        bot.sendMessage(chatId, formatTableMarkdown(entries), { parse_mode: "Markdown" });
 
         // Limpar arquivo temporário
         fs.unlinkSync(audioPath);
         console.log(`[INFO] Arquivo temporário removido: ${audioPath}`);
     } catch (err) {
         console.error(`[ERROR] ${err.message}`);
-        console.error(`[DEBUG] Detalhes do erro:`, err.response?.data || err.stack);
         bot.sendMessage(chatId, "Houve um erro ao processar o áudio.");
     }
 });
@@ -75,25 +71,18 @@ async function downloadAudio(fileId) {
     const fileUrl = await bot.getFileLink(fileId);
     const audioPath = path.join("./", "temp.ogg");
 
-    console.log(`[INFO] URL do arquivo obtida: ${fileUrl}`);
-
-    // Baixa o arquivo usando https.get
-    await new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
         const file = fs.createWriteStream(audioPath);
         https.get(fileUrl, (response) => {
             if (response.statusCode !== 200) {
-                reject(new Error(`Falha no download. Status: ${response.statusCode}`));
+                reject(new Error(`Download failed with status: ${response.statusCode}`));
             }
             response.pipe(file);
             file.on("finish", () => {
-                file.close(resolve);
+                file.close(() => resolve(audioPath));
             });
-        }).on("error", (err) => {
-            fs.unlink(audioPath, () => reject(err));
-        });
+        }).on("error", reject);
     });
-
-    return audioPath;
 }
 
 // Função para transcrever o áudio usando Whisper
@@ -107,79 +96,52 @@ async function transcribeAudio(filePath) {
 
 // Função para detectar e normalizar lançamentos financeiros
 async function detectAndNormalizeLaunches(transcription) {
-    const today = DateTime.now().setZone("America/Sao_Paulo").toFormat("dd/MM/yyyy");
+    const today = DateTime.now().setZone("America/Sao_Paulo").toISODate();
     const messages = [
         {
             role: "system",
-            content: `Você é um assistente financeiro. A data de hoje é ${today}. Baseado nesse contexto, processe o texto fornecido para identificar lançamentos financeiros no formato JSON puro, sem qualquer formatação adicional, como blocos de código Markdown (ex.: \`\`\`json). Cada lançamento deve conter:
-            - "data": data do lançamento no formato DD/MM/AAAA.
-            - "descricao": descrição do gasto.
-            - "valor": valor do lançamento.
-            Se nenhum lançamento for encontrado, retorne um JSON vazio [].`,
+            content: `You are a financial assistant. Today's date is ${today}. Extract financial entries from the given transcription.`,
         },
         { role: "user", content: transcription },
     ];
 
-    const response = await openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
-        messages,
-    });
-
-    let responseText = response.choices[0].message.content.trim();
-
-    // Remova marcas de código Markdown, se existirem
-    if (responseText.startsWith("```json")) {
-        responseText = responseText.replace(/```json|```/g, "").trim();
-    }
-
-    // Tente parsear o JSON
     try {
-        return JSON.parse(responseText);
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini-2024-07-18",
+            messages,
+            response_format: zodResponseFormat(FinancialEntriesSchema, "financial_entries"),
+        });
+
+        if (completion.choices[0].message.refusal) {
+            throw new Error("The model refused to generate the structured output.");
+        }
+
+        // Obter a mensagem e fazer o parsing do JSON
+        const parsedResponse = JSON.parse(completion.choices[0].message.content); // Converte a string JSON em objeto
+
+        // Validar se a resposta contém a propriedade 'entries'
+        if (!parsedResponse.entries || !Array.isArray(parsedResponse.entries)) {
+            throw new Error("Invalid 'entries' format in API response.");
+        }
+
+        return parsedResponse.entries;
     } catch (err) {
-        console.error(`[ERROR] Falha ao processar JSON:`, responseText);
-        throw new Error("A resposta da API não está em formato JSON válido.");
+        console.error(`[ERROR] Failed to process structured JSON:`, err.message);
+        throw new Error("Failed to process structured JSON.");
     }
 }
 
-// Função para formatar a tabela em Markdown
-function formatTableMarkdown(launches) {
-    // Verifica se launches é um array diretamente
-    if (Array.isArray(launches)) {
-        return formatLaunchesArray(launches);
-    }
+// Função para formatar os lançamentos em Markdown
+function formatTableMarkdown(entries) {
+    if (!entries.length) return "*No entries detected.*";
 
-    // Verifica se launches contém a chave "lançamentos" e é um objeto
-    if (launches && Array.isArray(launches.lançamentos)) {
-        return formatLaunchesArray(launches.lançamentos);
-    }
-
-    // Caso contrário, retorno padrão
-    return "*Nenhum lançamento detectado.*";
-}
-
-// Função auxiliar para formatar o array de lançamentos
-function formatLaunchesArray(launchesArray) {
-    let formattedTable = "*Lançamentos:*\n\n";
-    launchesArray.forEach((launch) => {
-        formattedTable += `  *Data:* ${launch.data}\n`;
-        formattedTable += `  *Descrição:* ${launch.descricao}\n`;
-        formattedTable += `  *Valor:* R$${launch.valor.toFixed(2)}\n\n`;
+    let table = "*Financial Entries:*\n";
+    entries.forEach((entry) => {
+        table += `- *Date:* ${entry.date}\n`;
+        table += `  *Description:* ${entry.description}\n`;
+        table += `  *Value:* $${entry.value.toFixed(2)}\n\n`;
     });
-    return formattedTable.trim();
-}
-
-// Funções auxiliares para cálculo de custos
-function calculateWhisperCost(durationInSeconds) {
-    return (durationInSeconds / 60) * WHISPER_COST_PER_MINUTE;
-}
-
-function calculateLLMCost(transcription) {
-    const tokenCount = transcription.split(/\s+/).length;
-    return (tokenCount / 1000) * LLM_COST_PER_1000_TOKENS;
-}
-
-function convertToCents(valueInDollars) {
-    return Math.round(valueInDollars * 100);
+    return table.trim();
 }
 
 console.log("Bot está ativo!");
