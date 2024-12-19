@@ -3,6 +3,7 @@ import TelegramBot from "node-telegram-bot-api";
 import fs from "fs";
 import path from "path";
 import https from "https";
+import { DateTime } from "luxon";
 import OpenAI from "openai";
 
 dotenv.config(); // Carrega variáveis de ambiente
@@ -23,40 +24,41 @@ const LLM_COST_PER_1000_TOKENS = 0.002;
 bot.on("voice", async (msg) => {
     const chatId = msg.chat.id;
     const fileId = msg.voice.file_id;
-    const duration = msg.voice.duration; // Duração do áudio em segundos
+    const duration = msg.voice.duration;
 
     console.log(`[INFO] Mensagem recebida: Chat ID = ${chatId}, File ID = ${fileId}, Duração = ${duration} segundos`);
 
     try {
         // Baixar o áudio do Telegram
         const audioPath = await downloadAudio(fileId);
-
         console.log(`[INFO] Áudio baixado: Caminho = ${audioPath}`);
 
         // Transcrever o áudio usando o Whisper
         const transcription = await transcribeAudio(audioPath);
-
         console.log(`[INFO] Transcrição recebida: ${transcription}`);
 
-        // Detectar lançamentos financeiros usando o modelo GPT
-        const launches = await detectFinancialLaunches(transcription);
-
-        console.log(`[INFO] Lançamentos detectados: ${launches}`);
+        // Detectar lançamentos financeiros e normalizar datas
+        const launches = await detectAndNormalizeLaunches(transcription);
+        console.log(`[INFO] Lançamentos detectados: ${JSON.stringify(launches)}`);
 
         // Calcular custos
-        const whisperCost = calculateWhisperCost(duration);
-        const llmCost = calculateLLMCost(transcription);
-        const totalCost = whisperCost + llmCost;
+        // const whisperCost = calculateWhisperCost(duration);
+        // const llmCost = calculateLLMCost(transcription);
+        // const totalCost = whisperCost + llmCost;
 
-        console.log(`[INFO] Custos calculados: Whisper = $${whisperCost}, LLM = $${llmCost}, Total = $${totalCost}`);
+        // console.log(`[INFO] Custos calculados: Whisper = $${whisperCost}, LLM = $${llmCost}, Total = $${totalCost}`);
 
         // Enviar respostas ao usuário
-        bot.sendMessage(chatId, `Transcrição Bruta:\n${transcription}`);
-        bot.sendMessage(chatId, `Lançamentos Detectados:\n${formatLaunches(launches)}`);
-        bot.sendMessage(
-            chatId,
-            `Custos:\n- Whisper: ${convertToCents(whisperCost)} centavos\n- LLM: ${convertToCents(llmCost)} centavos\n- Total: ${convertToCents(totalCost)} centavos`
-        );
+        bot.sendMessage(chatId, `*Transcrição:*\n${transcription}`, { parse_mode: "Markdown" });
+        bot.sendMessage(chatId, formatTableMarkdown(launches), { parse_mode: "Markdown" });
+        // bot.sendMessage(
+        //     chatId,
+        //     `*Custos:*\n` +
+        //         `- *Whisper:* ${convertToCents(whisperCost)} centavos\n` +
+        //         `- *LLM:* ${convertToCents(llmCost)} centavos\n` +
+        //         `- *Total:* ${convertToCents(totalCost)} centavos`,
+        //     { parse_mode: "Markdown" }
+        // );
 
         // Limpar arquivo temporário
         fs.unlinkSync(audioPath);
@@ -103,10 +105,18 @@ async function transcribeAudio(filePath) {
     return response.text;
 }
 
-// Função para detectar lançamentos financeiros usando GPT
-async function detectFinancialLaunches(transcription) {
+// Função para detectar e normalizar lançamentos financeiros
+async function detectAndNormalizeLaunches(transcription) {
+    const today = DateTime.now().setZone("America/Sao_Paulo").toFormat("dd/MM/yyyy");
     const messages = [
-        { role: "system", content: "Você é um assistente financeiro. Identifique lançamentos financeiros no texto fornecido." },
+        {
+            role: "system",
+            content: `Você é um assistente financeiro. A data de hoje é ${today}. Baseado nesse contexto, processe o texto fornecido para identificar lançamentos financeiros no formato JSON puro, sem qualquer formatação adicional, como blocos de código Markdown (ex.: \`\`\`json). Cada lançamento deve conter:
+            - "data": data do lançamento no formato DD/MM/AAAA.
+            - "descricao": descrição do gasto.
+            - "valor": valor do lançamento.
+            Se nenhum lançamento for encontrado, retorne um JSON vazio [].`,
+        },
         { role: "user", content: transcription },
     ];
 
@@ -115,10 +125,50 @@ async function detectFinancialLaunches(transcription) {
         messages,
     });
 
-    return response.choices[0].message.content.trim();
+    let responseText = response.choices[0].message.content.trim();
+
+    // Remova marcas de código Markdown, se existirem
+    if (responseText.startsWith("```json")) {
+        responseText = responseText.replace(/```json|```/g, "").trim();
+    }
+
+    // Tente parsear o JSON
+    try {
+        return JSON.parse(responseText);
+    } catch (err) {
+        console.error(`[ERROR] Falha ao processar JSON:`, responseText);
+        throw new Error("A resposta da API não está em formato JSON válido.");
+    }
 }
 
-// Funções auxiliares para cálculo de custos e formatação
+// Função para formatar a tabela em Markdown
+function formatTableMarkdown(launches) {
+    // Verifica se launches é um array diretamente
+    if (Array.isArray(launches)) {
+        return formatLaunchesArray(launches);
+    }
+
+    // Verifica se launches contém a chave "lançamentos" e é um objeto
+    if (launches && Array.isArray(launches.lançamentos)) {
+        return formatLaunchesArray(launches.lançamentos);
+    }
+
+    // Caso contrário, retorno padrão
+    return "*Nenhum lançamento detectado.*";
+}
+
+// Função auxiliar para formatar o array de lançamentos
+function formatLaunchesArray(launchesArray) {
+    let formattedTable = "*Lançamentos:*\n\n";
+    launchesArray.forEach((launch) => {
+        formattedTable += `  *Data:* ${launch.data}\n`;
+        formattedTable += `  *Descrição:* ${launch.descricao}\n`;
+        formattedTable += `  *Valor:* R$${launch.valor.toFixed(2)}\n\n`;
+    });
+    return formattedTable.trim();
+}
+
+// Funções auxiliares para cálculo de custos
 function calculateWhisperCost(durationInSeconds) {
     return (durationInSeconds / 60) * WHISPER_COST_PER_MINUTE;
 }
@@ -126,12 +176,6 @@ function calculateWhisperCost(durationInSeconds) {
 function calculateLLMCost(transcription) {
     const tokenCount = transcription.split(/\s+/).length;
     return (tokenCount / 1000) * LLM_COST_PER_1000_TOKENS;
-}
-
-function formatLaunches(launches) {
-    return launches.includes("Nenhum lançamento detectado")
-        ? "Nenhum lançamento detectado"
-        : launches;
 }
 
 function convertToCents(valueInDollars) {
