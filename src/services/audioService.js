@@ -21,10 +21,21 @@ export async function downloadAudio(bot, fileId) {
     });
 }
 
-export async function transcribeAudio(filePath) {
-    const response = await openai.audio.transcriptions.create({
-        file: fs.createReadStream(filePath),
-        model: "whisper-1",
-    });
-    return response.text;
+export async function transcribeAudio(audioPath) {
+    try {
+        const transcription = await openai.audio.transcriptions.create({
+            file: fs.createReadStream(audioPath),
+            model: "whisper-1",
+        });
+        return transcription.text;
+    } finally {
+        // Remove o arquivo temporário após o processamento
+        fs.unlink(audioPath, (err) => {
+            if (err) {
+                console.error(`[ERROR] Failed to delete temporary file: ${audioPath}`, err);
+            } else {
+                console.log(`[INFO] Temporary file removed: ${audioPath}`);
+            }
+        });
+    }
 }
