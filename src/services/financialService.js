@@ -4,7 +4,11 @@ import { FinancialEntriesSchema } from "../schemas/financial.js";
 import { zodResponseFormat } from "openai/helpers/zod";
 
 export async function detectAndNormalizeLaunches(transcription) {
+    console.log('[FINANCIAL] Starting analysis of transcription:', transcription);
+
     const today = DateTime.now().setZone("America/Sao_Paulo").toISODate();
+    console.log('[FINANCIAL] Using reference date:', today);
+
     const messages = [
         {
             role: "system",
@@ -32,7 +36,10 @@ export async function detectAndNormalizeLaunches(transcription) {
 
         return parsedResponse.entries;
     } catch (err) {
-        console.error(`[ERROR] Failed to process structured JSON:`, err.message);
+        console.error('[FINANCIAL] Error processing structured JSON:', {
+            message: err.message,
+            stack: err.stack
+        });
         throw new Error("Failed to process structured JSON.");
     }
 }
