@@ -20,7 +20,6 @@ export async function transcribe(audioPath) {
         console.log('[AssemblyAI] Transcription completed. Response:', transcript);
 
         if (transcript.status === 'error') {
-            console.error('[AssemblyAI] Transcription failed:', transcript.error);
             throw new Error(`AssemblyAI transcription failed: ${transcript.error}`);
         }
 

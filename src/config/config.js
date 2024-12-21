@@ -1,5 +1,5 @@
+import { OpenAI } from "openai";
 import dotenv from "dotenv";
-import OpenAI from "openai";
 
 dotenv.config();
 
@@ -11,6 +11,14 @@ export const openaiConfig = {
 export const telegramConfig = {
     token: process.env.TELEGRAM_TOKEN,
     options: { polling: true }
+};
+
+export const sttConfig = {
+    provider: process.env.STT_PROVIDER || 'whisper',
+    apiKeys: {
+        assemblyai: process.env.ASSEMBLYAI_API_KEY,
+        deepgram: process.env.DEEPGRAM_API_KEY,
+    }
 };
 
 export const openai = new OpenAI(openaiConfig);
